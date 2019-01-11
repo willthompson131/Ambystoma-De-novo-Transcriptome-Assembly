@@ -1,0 +1,361 @@
+# De novo Ambystoma opacum Transcriptome Assembly Pipeline 
+#---------------------------------------------------------------------------------
+# Received RNA sequencing data from Emily B. in September. The following has been
+# modified from the work of Matthew H., Samantha B., and Emily B. over the last few months.
+# 7 sample transcripts were sent for sequencing, 2 failed although one was later resequenced. 
+#
+# Opacum samples 1,3, and 7 were female and 2, 4, 5, and 6 were male
+#
+#
+#
+#---------------------------------------------------------------------------------
+# 
+# Step 1: rCorrector
+# rCorrector is an error correct program for RNA-seq reads on the Illumina platform. 
+# rCorrector removes reads that are likely problematic (errors, low abundance). However rCorrector
+# does reduce some of the data in this process (although not likely critical data). 
+# Source code: https://github.com/mourisl/Rcorrector
+# Below is an example of rCorrector script used on opacum 5 samples. 
+
+#PBS -S /bin/bash
+#PBS -q batch
+#PBS -N rCorrector1.3test
+#PBS -l nodes=1:ppn=1
+#PBS -l walltime=48:00:00
+#PBS -l mem=20gb
+
+
+cd rCorrector_Output2
+
+module load Rcorrector/1.0.2-foss-2016b
+
+run_rcorrector.pl -1 /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L001_R1_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L002_R1_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L003_R1_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L004_R1_001.fastq -2 /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L001_R2_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L002_R2_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L003_R2_001.fastq,/scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/opacum-5_S16_L004_R2_001.fastq -t 4 > rCorrector_6.log
+
+#
+#
+#---------------------------------------------------------------------------------
+#
+# Step 2: Converting rCorrector outputs into a format compatible with trinity 
+#
+# I used a Harvard script to convert rCorrector into a form readable by Trinity (https://informatics.fas.harvard.edu/best-practices-for-de-novo-transcriptome-assembly-with-trinity.html) 
+# The rest of this section is taken directly from Matthew's GitHub (https://github.com/HaleDM/Alligator_Denovo/blob/master/Denovo_assembly_pipeline.txt)
+#
+#It is usable in the command line by:
+>python FilterUncorrectabledPEfastq.py -1 $1 -2 $2 -o fixed 2>&1 > rmunfixable_$r1.out
+#Where $1 is the name of your forward read and $2 is the name of your reverse read
+#-o will add the following string as a prefix to the output file (left as "fixed")
+#What follows ">" is the name for a log file just just tells the number of processed reads
+#Python script is pasted below
+"""
+author: adam h freedman
+afreedman405 at gmail.com
+data: Fri Aug 26 10:55:18 EDT 2016
+This script takes as an input Rcorrector error corrected Illumina paired-reads
+in fastq format and:
+1. Removes any reads that Rcorrector indentifes as containing an error,
+but can't be corrected, typically low complexity sequences. For these,
+the header contains 'unfixable'.
+2. Strips the ' cor' from headers of reads that Rcorrector fixed, to avoid
+issues created by certain header formats for downstream tools.
+3. Write a log with counts of (a) read pairs that were removed because one end
+was unfixable, (b) corrected left and right reads, (c) total number of
+read pairs containing at least one corrected read.
+Currently, this script only handles paired-end data, and handle either unzipped
+or gzipped files on the fly, so long as the gzipped files end with 'gz'.
+"""
+
+import sys        
+import gzip
+from itertools import izip,izip_longest
+import argparse
+from os.path import basename
+
+def get_input_streams(r1file,r2file):
+    if r1file[-2:]=='gz':
+        r1handle=gzip.open(r1file,'rb')
+        r2handle=gzip.open(r2file,'rb')
+    else:
+        r1handle=open(r1file,'r')
+        r2handle=open(r2file,'r')
+    
+    return r1handle,r2handle
+        
+        
+def grouper(iterable, n, fillvalue=None):
+    "Collect data into fixed-length chunks or blocks"
+    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx
+    args = [iter(iterable)] * n
+    return izip_longest(fillvalue=fillvalue, *args)  
+    
+
+if __name__=="__main__": 
+    parser = argparse.ArgumentParser(description="options for filtering and logging rCorrector fastq outputs")
+    parser.add_argument('-1','--left_reads',dest='leftreads',type=str,help='R1 fastq file')
+    parser.add_argument('-2','--right_reads',dest='rightreads',type=str,help='R2 fastq file')
+    parser.add_argument('-o','--out_prefix',dest='outprefix',type=str,help="prefix for filtered fastq output")
+    opts = parser.parse_args()
+
+    r1out=open(opts.outprefix+'_'+basename(opts.leftreads).replace('.gz',''),'w')
+    r2out=open(opts.outprefix+'_'+basename(opts.rightreads).replace('.gz','') ,'w')
+
+    r1_cor_count=0
+    r2_cor_count=0
+    pair_cor_count=0
+    unfix_count=0   
+
+    r1_stream,r2_stream=get_input_streams(opts.leftreads,opts.rightreads)
+
+    with r1_stream as f1, r2_stream as f2:
+        R1=grouper(f1,4)
+        R2=grouper(f2,4)
+        counter=0
+        for entry in R1:
+            counter+=1
+            if counter%100000==0:
+                print "%s reads processed" % counter
+        
+            head1,seq1,placeholder1,qual1=[i.strip() for i in entry]
+            head2,seq2,placeholder2,qual2=[j.strip() for j in R2.next()]
+            
+            if 'unfixable' in head1 or 'unfixable' in head2:
+                unfix_count+=1
+            else:
+                if 'cor' in head1:
+                    r1_cor_count+=1
+                if 'cor' in head2:
+                    r2_cor_count+=1
+                if 'cor' in head1 or 'cor' in head2:
+                    pair_cor_count+=1
+                
+                head1=head1.split('l:')[0][:-1] # keeps all before the low kmer count statistic and removes the trailing whitespace character
+                head2=head2.split('l:')[0][:-1] 
+                #head1=head1.replace(' cor','')
+                #head2=head2.replace(' cor','')
+                r1out.write('%s\n' % '\n'.join([head1,seq1,placeholder1,qual1]))
+                r2out.write('%s\n' % '\n'.join([head2,seq2,placeholder2,qual2]))
+
+    unfix_log=open('rmunfixable.log','w')
+    unfix_log.write('total PE reads:%s\nremoved PE reads:%s\nretained PE reads:%s\nR1 corrected:%s\nR2 corrected:%s\npairs corrected:%s\n' % (counter,unfix_count,counter-unfix_count,r1_cor_count,r2_cor_count,pair_cor_count))
+            
+    r1out.close()
+    r2out.close() 
+#The above script is being used in a local shell script (not run through cluster, just locally)
+#Write and copy script to same directory as rCorrector Output
+#
+#---------------------------------------------------------------------------------
+#
+# Step 3: TrimGalore
+#
+# TrimGalore is a trimming software, which in addition to allowing you to edit the stringency and error rate,
+# can produce a FastQC report. 
+#
+
+
+#PBS -S /bin/bash
+#PBS -N TrimGalore2.0
+#PBS -q batch
+#PBS -l nodes=1:ppn=1:AMD
+#PBS -l walltime=10:00:00
+#PBS -l mem=10gb
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor
+
+mkdir TrimGalore_AllS3
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor
+
+module load Trim_Galore/0.4.5-foss-2016b
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L001_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L001_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L002_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L002_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L003_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L003_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L004_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-1_S27_L004_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L001_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L001_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L002_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L002_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L003_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L003_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L004_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-2_S20_L004_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L001_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L001_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L002_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L002_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L003_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L003_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L004_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-3_S1_L004_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L001_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L001_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L002_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L002_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L003_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L003_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L004_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-4_S24_L004_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L001_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L001_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L002_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L002_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L003_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L003_R2_001.cor.fq
+
+trim_galore --fastqc --fastqc_args "--outdir  /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 -f fastq" -stringency 3 -o /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3 --paired /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L004_R1_001.cor.fq /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/fixed_opacum-5_S16_L004_R2_001.cor.fq
+
+#---------------------------------------------------------------------------------
+
+
+# Step 4: Concatenation. 
+# Trimmed fastqs were concatenated together before assembly with the following script. 
+# Failure to cat together files resulted an assembly with unusually large N50s. 
+
+#PBS -S /bin/bash
+#PBS -N Trinity_Assembly1.2
+#PBS -q highmem_q
+#PBS -l nodes=1:ppn=16
+#PBS -l walltime=800:00:00
+#PBS -l mem=100gb
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed
+
+
+cat fixed_opacum-1_S27_L001_R2_001.cor_val_2.fq fixed_opacum-1_S27_L002_R2_001.cor_val_2.fq fixed_opacum-1_S27_L003_R2_001.cor_val_2.fq fixed_opacum-1_S27_L004_R2_001.cor_val_2.fq > fixed_opacum1_R2.cor.fq
+cat fixed_opacum-2_S20_L001_R2_001.cor_val_2.fq fixed_opacum-2_S20_L002_R2_001.cor_val_2.fq fixed_opacum-2_S20_L003_R2_001.cor_val_2.fq fixed_opacum-2_S20_L004_R2_001.cor_val_2.fq > fixed_opacum2_R2.cor.fq
+cat fixed_opacum-3_S1_L001_R2_001.cor_val_2.fq fixed_opacum-3_S1_L002_R2_001.cor_val_2.fq fixed_opacum-3_S1_L003_R2_001.cor_val_2.fq fixed_opacum-3_S1_L004_R2_001.cor_val_2.fq > fixed_opacum3_R2.cor.fq
+cat fixed_opacum-4_S24_L001_R2_001.cor_val_2.fq fixed_opacum-4_S24_L002_R2_001.cor_val_2.fq fixed_opacum-4_S24_L003_R2_001.cor_val_2.fq fixed_opacum-4_S24_L004_R2_001.cor_val_2.fq > fixed_opacum4_R2.cor.fq
+cat fixed_opacum-5_S16_L001_R2_001.cor_val_2.fq fixed_opacum-5_S16_L002_R2_001.cor_val_2.fq fixed_opacum-5_S16_L003_R2_001.cor_val_2.fq fixed_opacum-5_S16_L004_R2_001.cor_val_2.fq > fixed_opacum5_R2.cor.fq
+
+
+#---------------------------------------------------------------------------------
+
+# Step 4: Trinity 
+#
+#
+# Trinity used for de novo transcriptome assembly. 
+#
+# (https://github.com/trinityrnaseq/trinityrnaseq/wiki)
+#
+#PBS -S /bin/bash
+
+#PBS -N Trinity_Assembly1.2
+
+#PBS -q highmem_q
+
+#PBS -l nodes=1:ppn=16
+
+#PBS -l walltime=800:00:00
+
+#PBS -l mem=100gb
+
+
+
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat
+
+module load Trinity/2.6.6-foss-2016b
+
+Trinity --seqType fq --max_memory 100G --CPU 8 --no_version_check --full_cleanup --normalize_reads --SS_lib_type RF --left fixed_opacum1_R1.cor.fq,fixed_opacum2_R1.cor.fq,fixed_opacum3_R1.cor.fq,fixed_opacum4_R1.cor.fq,fixed_opacum5_R1.cor.fq,fixed_opacum_7_S1_R1_001.cor_val_1.fq --right fixed_opacum1_R2.cor.fq,fixed_opacum2_R2.cor.fq,fixed_opacum3_R2.cor.fq,fixed_opacum4_R2.cor.fq,fixed_opacum5_R2.cor.fq,fixed_opacum_7_S1_R2_001.cor_val_2.fq --output /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/TrinityAssembly2
+
+
+
+#---------------------------------------------------------------------------------
+
+# Step 5: Quality Assessment
+#
+#
+# Trinity was QA'd with the following scripts: An internal script in Trinity, Bowtie2, and SAMtools. 
+# Bowtie2 aligns sequence reads to long reference reads. 
+# 
+
+
+
+#PBS -S /bin/bash
+#PBS -N TrinityAssembly_QualityAssessment1.0
+#PBS -q batch
+#PBS -l nodes=1:ppn=1
+#PBS -l walltime=100:00:00
+#PBS -l mem=10gb
+
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/
+
+module load Trinity/2.6.6-foss-2016b
+/usr/local/apps/eb/Trinity/2.6.6-foss-2016b/trinityrnaseq-Trinity-v2.6.6/util/TrinityStats.pl TrinityAssembly2.Trinity.fasta > Trinity_FullAssembly.metrics
+
+module load Bowtie2/2.3.4.1-foss-2016b
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/
+bowtie2-build -f TrinityAssembly2.Trinity.fasta Trinity_FullFasta
+
+bowtie2 -x Trinity_FullFasta -1 fixed_opacum1_R1.cor.fq,fixed_opacum2_R1.cor.fq,fixed_opacum3_R1.cor.fq,fixed_opacum4_R1.cor.fq,fixed_opacum5_R1.cor.fq,fixed_opacum_7_S1_R1_001.cor_val_1.fq -2 fixed_opacum1_R2.cor.fq,fixed_opacum2_R2.cor.fq,fixed_opacum3_R2.cor.fq,fixed_opacum4_R2.cor.fq,fixed_opacum5_R2.cor.fq,fixed_opacum_7_S1_R2_001.cor_val_2.fq -S Trinity_FullAlignment
+
+
+module load SAMtools/1.6-foss-2016b
+
+cd /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/
+
+/usr/local/apps/eb/Trinity/2.6.6-foss-2016b/trinityrnaseq-Trinity-v2.6.6/util/misc/SAM_nameSorted_to_uniq_count_stats.pl Trinity_FullAlignment_sorted.bam > /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/
+
+# Results 
+
+################################
+## Counts of transcripts, etc.
+################################
+Total trinity 'genes':  150490
+Total trinity transcripts:	244195
+Percent GC: 46.48
+
+########################################
+Stats based on ALL transcript contigs:
+########################################
+
+        Contig N10: 7579
+        Contig N20: 5446
+        Contig N30: 4175
+        Contig N40: 3095
+        Contig N50: 2141
+
+        Median contig length: 321
+        Average contig: 785.91
+        Total assembled bases: 191916257
+
+#####################################################
+## Stats based on ONLY LONGEST ISOFORM per 'GENE':
+#####################################################
+
+        Contig N10: 6809
+        Contig N20: 4819
+        Contig N30: 3513
+        Contig N40: 2453
+        Contig N50: 1478
+
+        Median contig length: 302
+        Average contig: 678.32
+        Total assembled bases: 102080495
+
+
+Building a SMALL index
+96120217 reads; of these
+96120217 (100.00%) were paired; of these:
+    95910642 (99.78%) aligned concordantly 0 times
+    51816 (0.05%) aligned concordantly exactly 1 time
+    157759 (0.16%) aligned concordantly >1 times
+    ----
+    95910642 pairs aligned concordantly 0 times; of these:
+      8609030 (8.98%) aligned discordantly 1 time
+    ----
+    87301612 pairs aligned 0 times concordantly or discordantly; of these:
+      174603224 mates make up the pairs; of these:
+        27478994 (15.74%) aligned 0 times
+        38739984 (22.19%) aligned exactly 1 time
+        108384246 (62.07%) aligned >1 times
+85.71% overall alignment rate
+
+The following have been reloaded with a version change:
+  1) SAMtools/1.3.1-foss-2016b => SAMtools/1.6-foss-2016b
+
+/var/spool/torque/mom_priv/jobs/655566.sapelo2.SC: line 26: /scratch/wat28052/workDir/opacumRNAseq/opacumfastq/allfastq/rCorrector_Output/fixrcor/TrimGalore_AllS3/trimmed/cat/: Is a directory
